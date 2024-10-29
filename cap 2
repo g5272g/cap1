@@ -1,0 +1,681 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Saks Overlay Notebook\n",
+    "### Implementation details:\n",
+    "- Preparation in case of SAKS portfolio sale\n",
+    "\n",
+    "By: xle487\n",
+    "Last updated: 09/22/2023\n",
+    "\n",
+    "***"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "### MUST ADD REGION TO ALL S3 INPUT LINKS TO BE TREX RESILIENT ###\n",
+    "import os\n",
+    "region = ''\n",
+    "if os.getenv('AWS_REGION') == 'us-west-2':\n",
+    "    region = '-west'"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#################################### Current quarter dependent values ####################################\n",
+    "# This cell is the only one modified during the setup of the OL.\n",
+    "\n",
+    "# Specify the portfolios where the OL must be applied and the time_window\n",
+    "'''\n",
+    "SAKS Overlay is applied as follows:\n",
+    "1. Zero everything out\n",
+    "'''\n",
+    "\n",
+    "# Example below, which the user needs to edit:\n",
+    "saks_portfolio_list = ['SAKS_COBRAND','SAKS_FIFTH_AVENUE']\n",
+    "\n",
+    "\n",
+    "\n",
+    "##########################################################################################################"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "***"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Serenity Workflow\n",
+    "The cells in this section will be executed as part of Serenity workflow. Please do not modify them.\n",
+    "Note: If you are in developing/testing the code in this notebook, please comment out all cells in the **Serenity Workflow** section and uncomment all cells in the **Development/Testing** section."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Do not edit until the \"Begin BA edits\" section"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Import libraries\n",
+    "import pandas as pd\n",
+    "import numpy as np\n",
+    "import io\n",
+    "import os\n",
+    "from datetime import datetime\n",
+    "from dateutil.relativedelta import relativedelta\n",
+    "\n",
+    "pd.options.display.max_columns = 500 # this will set limit of columns to 500\n",
+    "pd.options.display.max_rows = 600 # this will set limit of rows to 500\n",
+    "pd.options.display.min_rows = 600 # this will set min of rows to 500\n",
+    "pd.options.display.max_colwidth = 500\n",
+    "pd.options.display.expand_frame_repr = False # This will cause datasets not to wrap\n",
+    "pd.options.display.float_format = '{:,.2f}'.format"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {
+    "tags": [
+     "parameters"
+    ]
+   },
+   "outputs": [],
+   "source": [
+    "# Parameters being set in the notebook\n",
+    "timestamp = None\n",
+    "previous_notebook_name = None\n",
+    "notebook_name = None\n",
+    "snapshot = None"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Function to get final stage of input DataFrame.\n",
+    "def get_final_stage(df):\n",
+    "    # Grabs the final stage\n",
+    "    final_stage = sorted(df['stage'].unique())[-1]\n",
+    "    # Filters the dataframe to include only the last stage\n",
+    "    final_stage_reversals = df[df['stage'] == final_stage].copy(deep=True)\n",
+    "    # Returns a dataframe\n",
+    "    return final_stage_reversals\n",
+    "\n",
+    "# Function to get name of current notebook that will serve to define stage name for current QF.\n",
+    "def get_stage_name(df, notebook_name):\n",
+    "    stage_order = str(int(df.stage.unique()[-1][:2])+1).zfill(2)  #WHY DO WE HAVE THIS\n",
+    "    stage_val = f\"{stage_order}_{notebook_name}\"\n",
+    "    return stage_val\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Always reads output (gaco and stress only) of previous notebook (not available for the first overlay)\n",
+    "if previous_notebook_name != \"\":\n",
+    "    previous_notebook_ol_output = pd.read_parquet(f\"{output_location}/qf/outputs/{previous_notebook_name}/{previous_notebook_name}_gaco.parquet\")\n",
+    "    previous_notebook_stress_factor_output = pd.read_parquet(f\"{output_location}/qf/outputs/{previous_notebook_name}/{previous_notebook_name}_stress_factor.parquet\")\n",
+    "    df_raw = previous_notebook_ol_output\n",
+    "else:\n",
+    "    df_ol = pd.read_parquet(f\"{output_location}/qf/inputs/operator/qf.parquet\")  # operator input\n",
+    "    df_raw = df_ol.copy(deep=True)\n",
+    "\n",
+    "# Get new stage name\n",
+    "new_stage_name = get_stage_name(df_raw, notebook_name)\n",
+    "\n",
+    "# Get last stage of raw input dataframe\n",
+    "df_last_stage = get_final_stage(df_raw)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 16,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# ### FOR TEST PURPOSES ONLY ###\n",
+    "\n",
+    "# df_all_stage_qf = pd.read_parquet('s3://cof-risk-ccrm-card-lfa-quarterly-process-2023-q4/allowance/outputs/official/20231205_phase1_acl_subgroup/parquet/qf_overlays/qf_overlays__gaco_output__20231205_phase1_acl_subgroup.parquet')\n",
+    "# display(df_all_stage_qf['stage'].unique())\n",
+    "# df_last_stage = df_all_stage_qf.loc[df_all_stage_qf['stage']=='39_05_OL_STR_Runoff_Partners_vPrimary',:]\n",
+    "# new_stage_name = 'XX_XX_mystagename'\n",
+    "\n",
+    "# df_last_stage = df_last_stage.loc[df_last_stage['lob']=='SB',:]\n",
+    "# df_out_stress = pd.DataFrame()\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Begin BA edits\n",
+    "__________________________________________________________________"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "total_cols_list = df_last_stage.columns\n",
+    "acl_cols_list = []\n",
+    "for c in total_cols_list:\n",
+    "    if len(c) > 10:\n",
+    "        end_of_c = c[-10:]\n",
+    "        try:\n",
+    "            date = datetime.strptime(end_of_c, '%Y-%m-%d')\n",
+    "            acl_cols_list = acl_cols_list + [c]\n",
+    "        except:\n",
+    "            pass\n",
+    "\n",
+    "key_cols = ['country','lob','portfolio','snapshot_month','calendar_month']\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "['2023-09-01', '2023-12-01', '2024-03-01']"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "pq_date_list = []\n",
+    "\n",
+    "for c in acl_cols_list:\n",
+    "    c_date = c[-10:]\n",
+    "    if c_date not in pq_date_list:\n",
+    "        pq_date_list = pq_date_list + [c_date]\n",
+    "\n",
+    "display(pq_date_list)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "['post_loss_share_gaco_cecl',\n",
+       " 'post_loss_share_naco_cecl',\n",
+       " 'post_loss_share_prin_cecl_recoveries',\n",
+       " 'post_loss_share_nonprin_cecl_recoveries',\n",
+       " 'post_loss_share_total_cecl_recoveries',\n",
+       " 'post_loss_share_bb_prin_cecl_recoveries',\n",
+       " 'post_loss_share_fb_prin_cecl_recoveries',\n",
+       " 'post_loss_share_bb_total_cecl_recoveries',\n",
+       " 'post_loss_share_fb_total_cecl_recoveries',\n",
+       " 'post_loss_share_reversals_cecl',\n",
+       " 'post_loss_share_guco_cecl']"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "prefix_list = []\n",
+    "\n",
+    "for c in acl_cols_list:\n",
+    "    c_pre = c[:-11]\n",
+    "    if c_pre not in prefix_list and 'post_loss_share' in c_pre and 'cecl' in c_pre:\n",
+    "        prefix_list = prefix_list + [c_pre]\n",
+    "\n",
+    "display(prefix_list)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "non_acl_list = []\n",
+    "\n",
+    "for c in total_cols_list:\n",
+    "    if c not in non_acl_list and 'post_loss_share' in c and c not in acl_cols_list:\n",
+    "        non_acl_list = non_acl_list + [c]\n",
+    "\n",
+    "# display(non_acl_list)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def ol_applier_func(input_df):\n",
+    "    \n",
+    "    mask1 = input_df['portfolio'].isin(saks_portfolio_list)\n",
+    "    list_of_relevant_columns = key_cols\n",
+    "    input_df_copy = input_df.copy(deep=True)\n",
+    "    \n",
+    "    for date in pq_date_list:\n",
+    "        \n",
+    "#         # Calculate fb cecl nonprin recoveries\n",
+    "#         c1 = 'post_loss_share_fb_nonprin_cecl_recoveries' + '_' + date\n",
+    "#         c2 = 'post_loss_share_fb_total_cecl_recoveries' + '_' + date\n",
+    "#         c3 = 'post_loss_share_fb_prin_cecl_recoveries' + '_' + date\n",
+    "#         input_df[c1] = None\n",
+    "#         mask2 = (~input_df[c1].isna()) | (~input_df[c2].isna()) | (~input_df[c3].isna())\n",
+    "#         input_df.loc[mask1&mask2,c1] = input_df.loc[mask1&mask2,c2].fillna(0) - input_df.loc[mask1&mask2,c3].fillna(0)\n",
+    "        \n",
+    "#         # Zero out GACO, FB (Prin and Non-Prin) Recoveries, and Reversals for CECL Post Loss Share columns\n",
+    "#         zeroed_cols_list = ['post_loss_share_gaco_cecl' , \\\n",
+    "#                      'post_loss_share_fb_prin_cecl_recoveries' , \\\n",
+    "#                      'post_loss_share_fb_nonprin_cecl_recoveries' , \\\n",
+    "#                      'post_loss_share_reversals_cecl']\n",
+    "        \n",
+    "        zeroed_cols_list = prefix_list\n",
+    "        \n",
+    "        for col in zeroed_cols_list:\n",
+    "            c = col + '_' + date\n",
+    "            mask2 = ~input_df[c].isna()\n",
+    "            input_df.loc[mask1&mask2,c] = 0\n",
+    "            if col != 'post_loss_share_fb_nonprin_cecl_recoveries':\n",
+    "                list_of_relevant_columns = list_of_relevant_columns + [c]\n",
+    "        \n",
+    "#         # Recalculate fb cecl total recoveries\n",
+    "#         c1 = 'post_loss_share_fb_total_cecl_recoveries' + '_' + date\n",
+    "#         c2 = 'post_loss_share_fb_nonprin_cecl_recoveries' + '_' + date\n",
+    "#         c3 = 'post_loss_share_fb_prin_cecl_recoveries' + '_' + date\n",
+    "#         mask2 = (~input_df[c1].isna()) | (~input_df[c2].isna()) | (~input_df[c3].isna())\n",
+    "#         input_df.loc[mask1&mask2,c1] = input_df.loc[mask1&mask2,c2].fillna(0) + input_df.loc[mask1&mask2,c3].fillna(0)\n",
+    "#         list_of_relevant_columns = list_of_relevant_columns + [c1]\n",
+    "        \n",
+    "#         input_df = input_df.drop(columns=['post_loss_share_fb_nonprin_cecl_recoveries' + '_' + date])\n",
+    "        \n",
+    "#         # Pull BB Recovery Prin LF column and copy over to ACL version\n",
+    "#         # Also, zero out all values before snapshot date\n",
+    "#         c = 'post_loss_share_bb_prin_cecl_recoveries' + '_' + date\n",
+    "#         mask2 = ~input_df[c].isna()\n",
+    "#         input_df.loc[mask1&mask2,c] = input_df.loc[mask1&mask2,'post_loss_share_bb_prin_recoveries']\n",
+    "#         mask3 = pd.to_datetime(input_df['calendar_month']) < datetime.strptime(date,'%Y-%m-%d')\n",
+    "#         input_df.loc[mask1&mask2&mask3,c] = 0\n",
+    "#         list_of_relevant_columns = list_of_relevant_columns + ['post_loss_share_bb_prin_recoveries']\n",
+    "#         list_of_relevant_columns = list_of_relevant_columns + [c]\n",
+    "        \n",
+    "#         # Pull BB Recovery Total LF column and copy over to ACL version\n",
+    "#         # Also, zero out all values before snapshot date\n",
+    "#         c = 'post_loss_share_bb_total_cecl_recoveries' + '_' + date\n",
+    "#         mask2 = ~input_df[c].isna()\n",
+    "#         input_df.loc[mask1&mask2,c] = input_df.loc[mask1&mask2,'post_loss_share_bb_total_recoveries']\n",
+    "#         mask3 = pd.to_datetime(input_df['calendar_month']) < datetime.strptime(date,'%Y-%m-%d')\n",
+    "#         input_df.loc[mask1&mask2&mask3,c] = 0\n",
+    "#         list_of_relevant_columns = list_of_relevant_columns + ['post_loss_share_bb_total_recoveries']\n",
+    "#         list_of_relevant_columns = list_of_relevant_columns + [c]\n",
+    "        \n",
+    "#         # Recalculate total cecl prin recoveries\n",
+    "#         c1 = 'post_loss_share_prin_cecl_recoveries' + '_' + date\n",
+    "#         c2 = 'post_loss_share_fb_prin_cecl_recoveries' + '_' + date\n",
+    "#         c3 = 'post_loss_share_bb_prin_cecl_recoveries' + '_' + date\n",
+    "#         mask2 = (~input_df[c1].isna()) | (~input_df[c2].isna()) | (~input_df[c3].isna())\n",
+    "#         input_df.loc[mask1&mask2,c1] = input_df.loc[mask1&mask2,c2].fillna(0) + input_df.loc[mask1&mask2,c3].fillna(0)\n",
+    "#         list_of_relevant_columns = list_of_relevant_columns + [c1]\n",
+    "        \n",
+    "#         # Recalculate total cecl total recoveries\n",
+    "#         c1 = 'post_loss_share_total_cecl_recoveries' + '_' + date\n",
+    "#         c2 = 'post_loss_share_fb_total_cecl_recoveries' + '_' + date\n",
+    "#         c3 = 'post_loss_share_bb_total_cecl_recoveries' + '_' + date\n",
+    "#         mask2 = (~input_df[c1].isna()) | (~input_df[c2].isna()) | (~input_df[c3].isna())\n",
+    "#         input_df.loc[mask1&mask2,c1] = input_df.loc[mask1&mask2,c2].fillna(0) + input_df.loc[mask1&mask2,c3].fillna(0)\n",
+    "#         list_of_relevant_columns = list_of_relevant_columns + [c1]\n",
+    "        \n",
+    "#         # Recalculate total cecl nonprin recoveries\n",
+    "#         c1 = 'post_loss_share_nonprin_cecl_recoveries' + '_' + date\n",
+    "#         c2 = 'post_loss_share_total_cecl_recoveries' + '_' + date\n",
+    "#         c3 = 'post_loss_share_prin_cecl_recoveries' + '_' + date\n",
+    "#         mask2 = (~input_df[c1].isna()) | (~input_df[c2].isna()) | (~input_df[c3].isna())\n",
+    "#         input_df.loc[mask1&mask2,c1] = input_df.loc[mask1&mask2,c2].fillna(0) - input_df.loc[mask1&mask2,c3].fillna(0)\n",
+    "#         list_of_relevant_columns = list_of_relevant_columns + [c1]\n",
+    "        \n",
+    "#         # Recalculate total cecl naco\n",
+    "#         c1 = 'post_loss_share_naco_cecl' + '_' + date\n",
+    "#         c2 = 'post_loss_share_gaco_cecl' + '_' + date\n",
+    "#         c3 = 'post_loss_share_prin_cecl_recoveries' + '_' + date\n",
+    "#         mask2 = (~input_df[c1].isna()) | (~input_df[c2].isna()) | (~input_df[c3].isna())\n",
+    "#         input_df.loc[mask1&mask2,c1] = input_df.loc[mask1&mask2,c2].fillna(0) - input_df.loc[mask1&mask2,c3].fillna(0)\n",
+    "#         list_of_relevant_columns = list_of_relevant_columns + [c1]\n",
+    "        \n",
+    "        # Recalculate total cecl fcfr\n",
+    "        c1 = 'post_loss_share_fcfr' + '_' + date\n",
+    "        c2 = 'post_loss_share_reversals_cecl' + '_' + date\n",
+    "        c3 = 'post_loss_share_nonprin_cecl_recoveries' + '_' + date\n",
+    "        mask2 = (~input_df[c1].isna()) | (~input_df[c2].isna()) | (~input_df[c3].isna())\n",
+    "        input_df.loc[mask1&mask2,c1] = input_df.loc[mask1&mask2,c2].fillna(0) - input_df.loc[mask1&mask2,c3].fillna(0)\n",
+    "        list_of_relevant_columns = list_of_relevant_columns + [c1]\n",
+    "        \n",
+    "#         # Recalculate total cecl guco\n",
+    "#         c1 = 'post_loss_share_guco_cecl' + '_' + date\n",
+    "#         c2 = 'post_loss_share_gaco_cecl' + '_' + date\n",
+    "#         c3 = 'post_loss_share_reversals_cecl' + '_' + date\n",
+    "#         mask2 = (~input_df[c1].isna()) | (~input_df[c2].isna()) | (~input_df[c3].isna())\n",
+    "#         input_df.loc[mask1&mask2,c1] = input_df.loc[mask1&mask2,c2].fillna(0) + input_df.loc[mask1&mask2,c3].fillna(0)\n",
+    "#         list_of_relevant_columns = list_of_relevant_columns + [c1]\n",
+    "        \n",
+    "        # Recalculate total cecl acl\n",
+    "        c1 = 'post_loss_share_total_acl' + '_' + date\n",
+    "        c2 = 'post_loss_share_naco_cecl' + '_' + date\n",
+    "        c3 = 'post_loss_share_fcfr' + '_' + date\n",
+    "        mask2 = (~input_df[c1].isna()) | (~input_df[c2].isna()) | (~input_df[c3].isna())\n",
+    "        input_df.loc[mask1&mask2,c1] = input_df.loc[mask1&mask2,c2].fillna(0) + input_df.loc[mask1&mask2,c3].fillna(0)\n",
+    "        list_of_relevant_columns = list_of_relevant_columns + [c1]\n",
+    "        \n",
+    "    display(input_df_copy.loc[mask1,list_of_relevant_columns].head(10))\n",
+    "    display(input_df.loc[mask1,list_of_relevant_columns].head(10))\n",
+    "    display(input_df_copy.shape)\n",
+    "    display(input_df.shape)\n",
+    "    display(input_df_copy.columns.equals(input_df.columns))\n",
+    "    \n",
+    "    output_df = input_df.copy(deep=True)\n",
+    "\n",
+    "    return output_df\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>country</th>\n",
+       "      <th>lob</th>\n",
+       "      <th>portfolio</th>\n",
+       "      <th>snapshot_month</th>\n",
+       "      <th>calendar_month</th>\n",
+       "      <th>post_loss_share_gaco_cecl_2023-09-01</th>\n",
+       "      <th>post_loss_share_naco_cecl_2023-09-01</th>\n",
+       "      <th>post_loss_share_prin_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_nonprin_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_total_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_bb_prin_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_fb_prin_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_bb_total_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_fb_total_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_reversals_cecl_2023-09-01</th>\n",
+       "      <th>post_loss_share_guco_cecl_2023-09-01</th>\n",
+       "      <th>post_loss_share_fcfr_2023-09-01</th>\n",
+       "      <th>post_loss_share_total_acl_2023-09-01</th>\n",
+       "      <th>post_loss_share_gaco_cecl_2023-12-01</th>\n",
+       "      <th>post_loss_share_naco_cecl_2023-12-01</th>\n",
+       "      <th>post_loss_share_prin_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_nonprin_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_total_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_bb_prin_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_fb_prin_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_bb_total_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_fb_total_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_reversals_cecl_2023-12-01</th>\n",
+       "      <th>post_loss_share_guco_cecl_2023-12-01</th>\n",
+       "      <th>post_loss_share_fcfr_2023-12-01</th>\n",
+       "      <th>post_loss_share_total_acl_2023-12-01</th>\n",
+       "      <th>post_loss_share_gaco_cecl_2024-03-01</th>\n",
+       "      <th>post_loss_share_naco_cecl_2024-03-01</th>\n",
+       "      <th>post_loss_share_prin_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_nonprin_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_total_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_bb_prin_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_fb_prin_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_bb_total_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_fb_total_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_reversals_cecl_2024-03-01</th>\n",
+       "      <th>post_loss_share_guco_cecl_2024-03-01</th>\n",
+       "      <th>post_loss_share_fcfr_2024-03-01</th>\n",
+       "      <th>post_loss_share_total_acl_2024-03-01</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "Empty DataFrame\n",
+       "Columns: [country, lob, portfolio, snapshot_month, calendar_month, post_loss_share_gaco_cecl_2023-09-01, post_loss_share_naco_cecl_2023-09-01, post_loss_share_prin_cecl_recoveries_2023-09-01, post_loss_share_nonprin_cecl_recoveries_2023-09-01, post_loss_share_total_cecl_recoveries_2023-09-01, post_loss_share_bb_prin_cecl_recoveries_2023-09-01, post_loss_share_fb_prin_cecl_recoveries_2023-09-01, post_loss_share_bb_total_cecl_recoveries_2023-09-01, post_loss_share_fb_total_cecl_recoveries_2023-09-01, post_loss_share_reversals_cecl_2023-09-01, post_loss_share_guco_cecl_2023-09-01, post_loss_share_fcfr_2023-09-01, post_loss_share_total_acl_2023-09-01, post_loss_share_gaco_cecl_2023-12-01, post_loss_share_naco_cecl_2023-12-01, post_loss_share_prin_cecl_recoveries_2023-12-01, post_loss_share_nonprin_cecl_recoveries_2023-12-01, post_loss_share_total_cecl_recoveries_2023-12-01, post_loss_share_bb_prin_cecl_recoveries_2023-12-01, post_loss_share_fb_prin_cecl_recoveries_2023-12-01, post_loss_share_bb_total_cecl_recoveries_2023-12-01, post_loss_share_fb_total_cecl_recoveries_2023-12-01, post_loss_share_reversals_cecl_2023-12-01, post_loss_share_guco_cecl_2023-12-01, post_loss_share_fcfr_2023-12-01, post_loss_share_total_acl_2023-12-01, post_loss_share_gaco_cecl_2024-03-01, post_loss_share_naco_cecl_2024-03-01, post_loss_share_prin_cecl_recoveries_2024-03-01, post_loss_share_nonprin_cecl_recoveries_2024-03-01, post_loss_share_total_cecl_recoveries_2024-03-01, post_loss_share_bb_prin_cecl_recoveries_2024-03-01, post_loss_share_fb_prin_cecl_recoveries_2024-03-01, post_loss_share_bb_total_cecl_recoveries_2024-03-01, post_loss_share_fb_total_cecl_recoveries_2024-03-01, post_loss_share_reversals_cecl_2024-03-01, post_loss_share_guco_cecl_2024-03-01, post_loss_share_fcfr_2024-03-01, post_loss_share_total_acl_2024-03-01]\n",
+       "Index: []"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>country</th>\n",
+       "      <th>lob</th>\n",
+       "      <th>portfolio</th>\n",
+       "      <th>snapshot_month</th>\n",
+       "      <th>calendar_month</th>\n",
+       "      <th>post_loss_share_gaco_cecl_2023-09-01</th>\n",
+       "      <th>post_loss_share_naco_cecl_2023-09-01</th>\n",
+       "      <th>post_loss_share_prin_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_nonprin_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_total_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_bb_prin_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_fb_prin_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_bb_total_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_fb_total_cecl_recoveries_2023-09-01</th>\n",
+       "      <th>post_loss_share_reversals_cecl_2023-09-01</th>\n",
+       "      <th>post_loss_share_guco_cecl_2023-09-01</th>\n",
+       "      <th>post_loss_share_fcfr_2023-09-01</th>\n",
+       "      <th>post_loss_share_total_acl_2023-09-01</th>\n",
+       "      <th>post_loss_share_gaco_cecl_2023-12-01</th>\n",
+       "      <th>post_loss_share_naco_cecl_2023-12-01</th>\n",
+       "      <th>post_loss_share_prin_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_nonprin_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_total_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_bb_prin_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_fb_prin_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_bb_total_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_fb_total_cecl_recoveries_2023-12-01</th>\n",
+       "      <th>post_loss_share_reversals_cecl_2023-12-01</th>\n",
+       "      <th>post_loss_share_guco_cecl_2023-12-01</th>\n",
+       "      <th>post_loss_share_fcfr_2023-12-01</th>\n",
+       "      <th>post_loss_share_total_acl_2023-12-01</th>\n",
+       "      <th>post_loss_share_gaco_cecl_2024-03-01</th>\n",
+       "      <th>post_loss_share_naco_cecl_2024-03-01</th>\n",
+       "      <th>post_loss_share_prin_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_nonprin_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_total_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_bb_prin_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_fb_prin_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_bb_total_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_fb_total_cecl_recoveries_2024-03-01</th>\n",
+       "      <th>post_loss_share_reversals_cecl_2024-03-01</th>\n",
+       "      <th>post_loss_share_guco_cecl_2024-03-01</th>\n",
+       "      <th>post_loss_share_fcfr_2024-03-01</th>\n",
+       "      <th>post_loss_share_total_acl_2024-03-01</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "Empty DataFrame\n",
+       "Columns: [country, lob, portfolio, snapshot_month, calendar_month, post_loss_share_gaco_cecl_2023-09-01, post_loss_share_naco_cecl_2023-09-01, post_loss_share_prin_cecl_recoveries_2023-09-01, post_loss_share_nonprin_cecl_recoveries_2023-09-01, post_loss_share_total_cecl_recoveries_2023-09-01, post_loss_share_bb_prin_cecl_recoveries_2023-09-01, post_loss_share_fb_prin_cecl_recoveries_2023-09-01, post_loss_share_bb_total_cecl_recoveries_2023-09-01, post_loss_share_fb_total_cecl_recoveries_2023-09-01, post_loss_share_reversals_cecl_2023-09-01, post_loss_share_guco_cecl_2023-09-01, post_loss_share_fcfr_2023-09-01, post_loss_share_total_acl_2023-09-01, post_loss_share_gaco_cecl_2023-12-01, post_loss_share_naco_cecl_2023-12-01, post_loss_share_prin_cecl_recoveries_2023-12-01, post_loss_share_nonprin_cecl_recoveries_2023-12-01, post_loss_share_total_cecl_recoveries_2023-12-01, post_loss_share_bb_prin_cecl_recoveries_2023-12-01, post_loss_share_fb_prin_cecl_recoveries_2023-12-01, post_loss_share_bb_total_cecl_recoveries_2023-12-01, post_loss_share_fb_total_cecl_recoveries_2023-12-01, post_loss_share_reversals_cecl_2023-12-01, post_loss_share_guco_cecl_2023-12-01, post_loss_share_fcfr_2023-12-01, post_loss_share_total_acl_2023-12-01, post_loss_share_gaco_cecl_2024-03-01, post_loss_share_naco_cecl_2024-03-01, post_loss_share_prin_cecl_recoveries_2024-03-01, post_loss_share_nonprin_cecl_recoveries_2024-03-01, post_loss_share_total_cecl_recoveries_2024-03-01, post_loss_share_bb_prin_cecl_recoveries_2024-03-01, post_loss_share_fb_prin_cecl_recoveries_2024-03-01, post_loss_share_bb_total_cecl_recoveries_2024-03-01, post_loss_share_fb_total_cecl_recoveries_2024-03-01, post_loss_share_reversals_cecl_2024-03-01, post_loss_share_guco_cecl_2024-03-01, post_loss_share_fcfr_2024-03-01, post_loss_share_total_acl_2024-03-01]\n",
+       "Index: []"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "text/plain": [
+       "(400, 299)"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "text/plain": [
+       "(400, 299)"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "text/plain": [
+       "True"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# Execute the function\n",
+    "df_out_ol = ol_applier_func(df_last_stage.copy(deep=True))\n",
+    "df_out_stress = pd.DataFrame()\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# End BA edits\n",
+    "______________"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 14,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Apply stage column\n",
+    "df_out_ol['stage'] = new_stage_name\n",
+    "if previous_notebook_name == \"\":\n",
+    "    df_out_combined_ol = pd.concat([df_raw, df_out_ol])\n",
+    "else:\n",
+    "    df_out_combined_ol = df_out_ol"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 15,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# This cell should not be changed.\n",
+    "fname_ol = f\"{output_location}/qf/outputs/{notebook_name}/{notebook_name}_gaco.parquet\"\n",
+    "fname_stress = f\"{output_location}/qf/outputs/{notebook_name}/{notebook_name}_stress_factor.parquet\"\n",
+    "\n",
+    "df_out_combined_ol.to_parquet(fname_ol, index=False)\n",
+    "df_out_stress.to_parquet(fname_stress, index=False)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python3 Serenity",
+   "language": "python",
+   "name": "serenity-kernel"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.8.18"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
